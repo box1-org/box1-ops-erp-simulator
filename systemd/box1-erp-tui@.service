@@ -1,0 +1,57 @@
+[Unit]
+Description=box1 legacy ERP console on %I
+Documentation=file:/usr/share/doc/box1-erp/RUNBOOK.md
+# One console per terminal: never run a getty on the same TTY. #25 also masks the
+# competing getty instance for the selected console.
+Conflicts=getty@%i.service serial-getty@%i.service
+After=systemd-user-sessions.service plymouth-quit-wait.service box1-erp-worker.service
+RequiresMountsFor=/var/lib/box1-erp
+# The console returns after an exit or crash, but a persistently broken console
+# stops after 10 starts a minute instead of storming (see RUNBOOK).
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=idle
+User=box1erp
+Group=box1erp
+UMask=0027
+Environment=BOX1_ERP_CONFIG=/etc/box1-erp/erp.conf
+# Serial console default. For the tty1/VNC profile, #25 sets TERM=linux in a drop-in.
+Environment=TERM=vt220
+ExecStart=/usr/lib/box1-erp/venv/bin/box1-erp tui
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=no
+UtmpIdentifier=%I
+Restart=always
+RestartSec=2
+SyslogIdentifier=box1-erp-tui
+MemoryMax=128M
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/box1-erp
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=box1-erp.target

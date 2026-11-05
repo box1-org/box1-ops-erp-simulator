@@ -1,0 +1,16 @@
+# /etc/box1-erp/erp.conf  (root:box1erp 0640; the application only reads it)
+[paths]
+# Ledger, spool and backups. Must be on the data volume.
+state_dir = /var/lib/box1-erp
+# SFTP exchange: inbound/, outbound/, consumed/. Same data volume.
+exchange_dir = /srv/box1-erp/exchange
+
+[demo]
+# Enables the console's demo fault screen (pause publication, delay AUTO,
+# one-shot crash after commit). Leave false outside demonstrations.
+faults = false
+
+[worker]
+poll_interval = 1.0
+heartbeat_stale_seconds = 10
+consumed_retention_days = 7

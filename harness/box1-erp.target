@@ -1,0 +1,7 @@
+# Harness stand-in for #25's target (#25 owns the real one and its console selection).
+[Unit]
+Description=box1 legacy ERP appliance (harness)
+Requires=multi-user.target
+After=multi-user.target
+Wants=box1-erp-worker.service
+AllowIsolate=yes
