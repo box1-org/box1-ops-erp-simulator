@@ -19,11 +19,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("worker", help="run the background worker")
     t = sub.add_parser("tui", help="run the console")
     t.add_argument("--label", default="", help="default operator label for the audit trail")
-    sub.add_parser("status", help="print counts and worker freshness as JSON")
+    st = sub.add_parser("status", help="print counts, ages and worker freshness as JSON")
+    st.add_argument("--check", action="store_true", help="exit 0 healthy, 1 degraded, 2 worker down (for monitoring)")
+    sub.add_parser("migrate", help="bring an existing ledger to this version's schema (backup first; services stopped)")
     b = sub.add_parser("backup", help="consistent backup into <state_dir>/backups/")
     b.add_argument("--label")
     r = sub.add_parser("restore", help="restore a backup directory (worker must be stopped)")
     r.add_argument("path")
+    r.add_argument("--accept-divergence", action="store_true",
+                   help="restore even though the current ledger has newer revisions or shipments (see runbook)")
     v = sub.add_parser("verify-backup", help="check a backup's digests, integrity and counts")
     v.add_argument("path")
     args = ap.parse_args(argv)
@@ -51,15 +55,35 @@ def main(argv: list[str] | None = None) -> int:
         from .status import snapshot
         conn = db.connect(str(cfg.ledger))
         try:
-            print(json.dumps(snapshot(conn, cfg).as_dict(), indent=2))
+            s = snapshot(conn, cfg)
+            print(json.dumps(s.as_dict(), indent=2))
         finally:
             conn.close()
-        return 0
+        return s.exit_code() if args.check else 0
+    if args.cmd == "migrate":
+        lock = db.LedgerLock(str(cfg.ledger), exclusive=True)
+        if not lock.acquire():
+            print("the worker or a console has the ledger open; stop box1-erp-worker and box1-erp-tui@* first", file=sys.stderr)
+            return 1
+        try:
+            if not cfg.ledger.exists():
+                print(f"no ledger at {cfg.ledger}", file=sys.stderr)
+                return 2
+            db.initialize(str(cfg.ledger))
+            print(f"ledger at schema {db.SCHEMA_VERSION}")
+            return 0
+        finally:
+            lock.release()
     if args.cmd == "backup":
         print(backup.backup(cfg, args.label))
         return 0
     if args.cmd == "restore":
-        print(json.dumps(backup.restore(cfg, Path(args.path))["counts"]))
+        try:
+            result = backup.restore(cfg, Path(args.path), accept_divergence=args.accept_divergence)
+        except backup.RestoreRefused as exc:
+            print(f"restore refused: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2))
         return 0
     if args.cmd == "verify-backup":
         print(json.dumps(backup.verify(Path(args.path))["counts"]))

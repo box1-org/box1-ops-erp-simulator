@@ -1,21 +1,23 @@
 # Development and test harness only. It does NOT replace VM acceptance (#25):
-# no serial console, no SELinux enforcement, no real data volume, no reboot.
+# no serial console, no SELinux enforcement, no reboot. The data volume is a podman volume.
 FROM quay.io/centos/centos:stream10@sha256:c54d6bf32b4349f1c7688d86193bd796668e4aa5e667fa27e781b82b6ecb1160
 RUN dnf -y install openssh-server openssh-clients python3 sqlite procps-ng util-linux && dnf clean all
 COPY packaging/sysusers-box1-erp.conf /usr/lib/sysusers.d/box1-erp.conf
-COPY packaging/tmpfiles-box1-erp.conf /usr/lib/tmpfiles.d/box1-erp.conf
+COPY packaging/provision-data-volume.sh /usr/libexec/box1-erp/provision-data-volume.sh
 COPY packaging/sshd-box1-erp-sftp.conf.example /etc/ssh/sshd_config.d/50-box1-erp-sftp.conf
 COPY systemd/box1-erp-worker.service systemd/box1-erp-tui@.service /usr/lib/systemd/system/
 COPY harness/box1-erp.target /usr/lib/systemd/system/box1-erp.target
 COPY harness/worker-harness-only.conf /etc/systemd/system/box1-erp-worker.service.d/harness-only.conf
 COPY config/erp.conf.example /etc/box1-erp/erp.conf
 COPY dist/box1_ops_erp_simulator-0.1.0-py3-none-any.whl /tmp/
-RUN systemd-sysusers && systemd-tmpfiles --create /usr/lib/tmpfiles.d/box1-erp.conf \
+RUN systemd-sysusers \
  && chown root:box1erp /etc/box1-erp/erp.conf && chmod 0640 /etc/box1-erp/erp.conf \
  && mkdir -p /etc/ssh/authorized_keys \
  && python3 -m venv --system-site-packages /usr/lib/box1-erp/venv \
  && /usr/lib/box1-erp/venv/bin/pip install --no-index --no-deps /tmp/box1_ops_erp_simulator-0.1.0-py3-none-any.whl \
  && rm /tmp/*.whl \
+ && ln -s /usr/lib/box1-erp/venv/bin/box1-erp /usr/bin/box1-erp \
+ && mkdir -p /srv/box1-erp \
  && systemctl enable sshd.service box1-erp-worker.service \
  && systemctl set-default box1-erp.target
 CMD ["/sbin/init"]

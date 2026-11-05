@@ -29,3 +29,19 @@ Enabled only by `faults = true` in the root-owned config. Pause publication, del
 ## Operator identity
 
 The operator label is an audit label typed at the console, not an authenticated identity. The console is a shared session protected by VM-console access (#25 RBAC).
+
+## The exchange is untrusted
+
+The SFTP account can create, rename, link and change modes in `inbound/`, `outbound/` and `consumed/`. So the worker:
+
+- opens inbound entries with `O_NOFOLLOW|O_NONBLOCK` and requires a regular file; anything else (link, directory, unreadable file) is moved to quarantine unopened, with an `UNREADABLE` `ERR` file;
+- hashes in chunks and keeps at most 64 KiB + 1 of an oversized upload;
+- copies each upload into a new file it owns before unlinking the inbound name, so the SFTP account keeps no handle on archived or quarantined evidence;
+- writes results to a fresh random temp name with `O_EXCL|O_NOFOLLOW` and renames over the final name (a planted link is replaced, never followed);
+- treats every entry and every result independently, with per-item backoff, so one bad entry never blocks the rest.
+
+Each upload is identified by device, inode and mtime (`ingest_key`). Recording an upload and moving it are idempotent per key, so a crash or a failing move never re-imports or re-publishes, and a fresh upload of identical bytes still gets its own `ERR`.
+
+## Ledger lock
+
+The worker and every console hold a shared `flock` on `state/ledger.lock`. Restore and `migrate` need it exclusively, so they refuse while anything has the ledger open, even a hung process. A console that cannot get the lock shows "restore in progress" and retries.

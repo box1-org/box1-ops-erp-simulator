@@ -205,16 +205,18 @@ def test_quarantine_replay_keeps_deduplication(cfg):
     row = conn.execute("SELECT state, error_code FROM quarantine WHERE id=?", (qid,)).fetchone()
     assert tuple(row) == ("QUARANTINED", "CONFLICTING_REUSE"), "replay must not weaken deduplication"
     assert conn.execute("SELECT quantity FROM request_lines").fetchone()[0] == 2
-    # A valid file quarantined earlier (for example by an older reader) is imported on replay.
+    # A valid file quarantined earlier (for example by an older reader) is imported on replay,
+    # and its stored copy moves to the archive.
     good = request_bytes(ful="ful_7", order="ord_7")
     (cfg.quarantine / "stored-good").write_bytes(good)
     domain.quarantine(conn, file_name="REQ.ful_7.0000aaaa.erp1", stored_name="stored-good", sha256="x" * 64,
-                      code="FIELD_VALUE", detail="older reader", request_id="ful_7")
+                      code="FIELD_VALUE", detail="older reader", request_id="ful_7", ingest_key="k-good")
     qid2 = conn.execute("SELECT id FROM quarantine WHERE stored_name='stored-good'").fetchone()[0]
     domain.request_replay(conn, qid2, actor=domain.CONSOLE)
     w.cycle()
     assert conn.execute("SELECT state FROM quarantine WHERE id=?", (qid2,)).fetchone()[0] == "REPLAYED"
     assert conn.execute("SELECT state FROM requests WHERE request_id='ful_7'").fetchone()[0] == "PENDING"
+    assert (cfg.archive / "stored-good").exists() and not (cfg.quarantine / "stored-good").exists()
     with pytest.raises(domain.DomainError):
         domain.request_replay(conn, qid2, actor=domain.CONSOLE)
     conn.close()
@@ -255,14 +257,16 @@ def test_stale_temp_files_from_a_crash_are_cleaned_and_republished(cfg):
     w.cycle()
     name = outbound(cfg)[0]
     (cfg.outbound / name).unlink()
-    (cfg.outbound / f".{name}.tmp").write_bytes(b"partial")
+    (cfg.outbound / ".0123456789abcdef.tmp").write_bytes(b"partial")   # our own leftover temp name
+    (cfg.outbound / ".REQ.foreign.tmp").write_bytes(b"not ours")      # someone else's: left alone
     conn = db.connect(str(cfg.ledger))
     conn.execute("UPDATE outbox SET publish_state='PENDING_PUBLISH'")  # crash before the ledger mark
     conn.close()
+    w.close()
     w2 = worker(cfg)
-    assert outbound(cfg) == []
+    assert sorted(p.name for p in cfg.outbound.iterdir()) == [".REQ.foreign.tmp"]
     w2.cycle()
-    assert outbound(cfg) == [name]
+    assert outbound(cfg) == [".REQ.foreign.tmp", name]
 
 
 def test_worker_refuses_to_start_without_its_ledger(tmp_path):
@@ -299,7 +303,10 @@ def test_publication_failure_is_recorded_and_retried(cfg):
         row = q(cfg, "SELECT publish_state, last_error FROM outbox")[0]
         assert row["publish_state"] == "PENDING_PUBLISH" and row["last_error"]
         assert q(cfg, "SELECT component FROM failures")[0][0] == "publish"
+        w.cycle()  # backing off: no second attempt within 5 s
+        assert q(cfg, "SELECT attempts FROM outbox")[0][0] == 1
     finally:
         os.chmod(cfg.outbound, 0o750)  # noqa: S103 - restores the test directory
+    w.publish_backoff.state.clear()  # as if the backoff had elapsed
     w.cycle()
     assert q(cfg, "SELECT publish_state FROM outbox")[0][0] == "PUBLISHED"

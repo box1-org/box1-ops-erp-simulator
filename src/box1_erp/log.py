@@ -15,7 +15,8 @@ class Log:
     def _emit(self, level: str, msg: str, **fields) -> None:
         if self.stream is None:
             return
-        record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z", "level": level,
+        t = time.time()
+        record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + f".{int(t * 1000) % 1000:03d}Z", "level": level,
                   "component": self.component, "msg": msg, **fields}
         try:
             self.stream.write(json.dumps(record, ensure_ascii=True, default=str) + "\n")

@@ -96,6 +96,10 @@ def test_renders_at_80x24_ascii_only_and_ships_with_confirmation(appliance):
         assert all(ch.isascii() for ch in c.text())
         assert c.screen.display[4].rstrip().endswith("UPDATED  OUT"), "every column fits in 80"
         assert c.screen.display[5].rstrip().endswith("OK"), c.screen.display[5]
+        header = c.screen.display[4]
+        assert header.split() == ["REQUEST", "ORDER", "STATE", "SHIPMENT", "SITE", "O", "LN", "UPDATED", "OUT"]
+        row = c.screen.display[5].split()
+        assert row[5:7] == ["E", "1"], "origin EVENT and one line item"
         assert "Enter=Detail" in c.screen.display[23]
         c.keys(b"\r")
         detail = c.wait_text("== Lines")

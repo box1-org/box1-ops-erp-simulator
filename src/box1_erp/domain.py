@@ -98,16 +98,17 @@ def _equivalence_json(parsed: protocol.ParsedFile) -> str:
 
 # ---------------------------------------------------------------- inbound
 
-def import_request(conn, parsed: protocol.ParsedFile, *, file_name: str, raw: bytes,
-                   quarantine_name: str | None = None) -> ImportOutcome:
+def import_request(conn, parsed: protocol.ParsedFile, *, file_name: str, raw: bytes, ingest_key: str | None = None,
+                   quarantine_name: str | None = None, sha256: str | None = None, replay: bool = False) -> ImportOutcome:
     """Record a valid request file. NEW creates the request and revision 1; an equivalent
-    repeat re-publishes the latest result unchanged; a conflicting repeat creates an ERR file."""
+    repeat re-publishes the latest result unchanged; a conflicting repeat is quarantined
+    with an ERR file in the same transaction (on replay the caller updates the replayed row instead)."""
     if parsed.file_type != "REQ":
         raise DomainError("not a request file")
     body = parsed.body
     rid = body["fulfillmentRequestId"]
     key = _equivalence_json(parsed)
-    sha = hashlib.sha256(raw).hexdigest()
+    sha = sha256 or hashlib.sha256(raw).hexdigest()
     with transaction(conn):
         existing = conn.execute("SELECT * FROM requests WHERE request_id=?", (rid,)).fetchone()
         ts = now()
@@ -122,52 +123,60 @@ def import_request(conn, parsed: protocol.ParsedFile, *, file_name: str, raw: by
                              [(rid, int(ln["lineNo"]), ln["sku"], int(ln["quantity"])) for ln in parsed.lines])
             req = conn.execute("SELECT * FROM requests WHERE request_id=?", (rid,)).fetchone()
             file_id = _new_result(conn, req, "PENDING", status_at=ts)
-            _record_file(conn, rid, "IN", file_name, sha, "ACCEPTED")
+            _record_file(conn, rid, "IN", file_name, sha, "ACCEPTED", ingest_key)
             _audit(conn, request_id=rid, action="IMPORT", prev=None, new="PENDING", actor=WORKER, detail=file_name)
             return ImportOutcome("NEW", rid, file_id)
         if existing["equivalence_key"] == key:
             latest = conn.execute("SELECT file_id FROM outbox WHERE request_id=? AND kind='RES' ORDER BY revision DESC LIMIT 1",
                                   (rid,)).fetchone()
             _republish(conn, latest["file_id"])
-            _record_file(conn, rid, "IN", file_name, sha, "DUPLICATE")
+            _record_file(conn, rid, "IN", file_name, sha, "DUPLICATE", ingest_key)
             _audit(conn, request_id=rid, action="DUPLICATE", prev=existing["state"], new=existing["state"], actor=WORKER,
                    detail=file_name)
             return ImportOutcome("DUPLICATE", rid, latest["file_id"])
-        error_id = _quarantine_row(conn, file_name=file_name, stored_name=quarantine_name or file_name, sha256=sha,
-                                   code="CONFLICTING_REUSE", detail=f"{rid} already exists with different content",
-                                   request_id=rid)
+        if replay:  # the caller marks the replayed quarantine row
+            return ImportOutcome("CONFLICT", rid, None)
+        error_id = _quarantine_row(conn, file_name=file_name, stored_name=quarantine_name or f"{sha[:16]}.{file_name}",
+                                   sha256=sha, ingest_key=ingest_key or f"{file_name}:{sha}", code="CONFLICTING_REUSE",
+                                   detail=f"{rid} already exists with different content", request_id=rid)
         _audit(conn, request_id=rid, action="CONFLICT", prev=existing["state"], new=existing["state"], actor=WORKER,
                detail=file_name)
         return ImportOutcome("CONFLICT", rid, error_id)
 
 
-def _record_file(conn, request_id, direction, file_name, sha, outcome):
-    conn.execute("INSERT INTO request_files(request_id, direction, file_name, sha256, outcome, at) VALUES (?,?,?,?,?,?)",
-                 (request_id, direction, file_name, sha, outcome, now()))
+def _record_file(conn, request_id, direction, file_name, sha, outcome, ingest_key=None):
+    conn.execute("INSERT INTO request_files(request_id, direction, file_name, sha256, outcome, ingest_key, at) VALUES (?,?,?,?,?,?,?)",
+                 (request_id, direction, file_name, sha, outcome, ingest_key, now()))
+
+
+def already_ingested(conn, ingest_key: str) -> str | None:
+    """Where an upload was already recorded (after a crash or a failed move): 'archive',
+    'quarantine' or None. The worker then only finishes moving the file."""
+    if conn.execute("SELECT 1 FROM quarantine WHERE ingest_key=?", (ingest_key,)).fetchone():
+        return "quarantine"
+    if conn.execute("SELECT 1 FROM request_files WHERE ingest_key=? AND direction='IN'", (ingest_key,)).fetchone():
+        return "archive"
+    return None
 
 
 def quarantine(conn, *, file_name: str, stored_name: str, sha256: str, code: str, detail: str,
-               request_id: str | None) -> str | None:
-    """Record a quarantined inbound file and its ERR file. Idempotent per (file name, content):
-    a crash before the file move re-runs this without a second record or error file."""
+               request_id: str | None, ingest_key: str) -> str | None:
+    """Record a quarantined upload and its ERR file. Idempotent per upload (ingest_key): a crash
+    before the file move re-runs this without a second record; a new upload of the same name
+    and bytes is a new upload and gets its own record and ERR file (SPEC section 4)."""
     with transaction(conn):
-        return _quarantine_row(conn, file_name=file_name, stored_name=stored_name, sha256=sha256, code=code, detail=detail,
-                               request_id=request_id)
+        return _quarantine_row(conn, file_name=file_name, stored_name=stored_name, sha256=sha256, ingest_key=ingest_key,
+                               code=code, detail=detail, request_id=request_id)
 
 
-def _quarantine_row(conn, *, file_name, stored_name, sha256, code, detail, request_id) -> str | None:
-    row = conn.execute("SELECT id, state FROM quarantine WHERE file_name=? AND sha256=?", (file_name, sha256)).fetchone()
-    if row is not None and row["state"] != "REPLAY_REQUESTED":
+def _quarantine_row(conn, *, file_name, stored_name, sha256, ingest_key, code, detail, request_id) -> str | None:
+    if conn.execute("SELECT 1 FROM quarantine WHERE ingest_key=?", (ingest_key,)).fetchone():
         return None
     error_id = _new_error(conn, inbound_name=file_name, request_id=request_id, code=code, detail=detail)
-    if row is None:
-        conn.execute(
-            "INSERT INTO quarantine(file_name, stored_name, sha256, error_code, detail, request_id, state, quarantined_at)"
-            " VALUES (?,?,?,?,?,?,'QUARANTINED',?)",
-            (file_name, stored_name, sha256, code, protocol.sanitize(detail, 200), request_id, now()))
-    else:
-        conn.execute("UPDATE quarantine SET state='QUARANTINED', error_code=?, detail=?, quarantined_at=? WHERE id=?",
-                     (code, protocol.sanitize(detail, 200), now(), row["id"]))
+    conn.execute(
+        "INSERT INTO quarantine(file_name, stored_name, ingest_key, sha256, error_code, detail, request_id, state, quarantined_at)"
+        " VALUES (?,?,?,?,?,?,?,'QUARANTINED',?)",
+        (protocol.sanitize(file_name, 255), stored_name, ingest_key, sha256, code, protocol.sanitize(detail, 200), request_id, now()))
     if request_id:
         _record_file(conn, request_id, "IN", file_name, sha256, f"QUARANTINED:{code}")
     _audit(conn, request_id=request_id, action="QUARANTINE", prev=None, new=None, actor=WORKER, reason=code, detail=file_name)
@@ -186,6 +195,18 @@ def request_replay(conn, quarantine_id: int, *, actor: str, label: str = "") -> 
         conn.execute("UPDATE quarantine SET state='REPLAY_REQUESTED' WHERE id=?", (quarantine_id,))
         _audit(conn, request_id=row["request_id"], action="REPLAY_REQUESTED", prev=None, new=None, actor=actor, label=label,
                detail=row["file_name"])
+
+
+def replay_failed(conn, quarantine_id: int, code: str, detail: str) -> str:
+    """The replayed file is still not acceptable (or is missing): back to QUARANTINED, with a new ERR."""
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM quarantine WHERE id=?", (quarantine_id,)).fetchone()
+        error_id = _new_error(conn, inbound_name=row["file_name"], request_id=row["request_id"], code=code, detail=detail)
+        conn.execute("UPDATE quarantine SET state='QUARANTINED', error_code=?, detail=?, quarantined_at=? WHERE id=?",
+                     (code, protocol.sanitize(detail, 200), now(), quarantine_id))
+        _audit(conn, request_id=row["request_id"], action="REPLAY_FAILED", prev=None, new=None, actor=WORKER, reason=code,
+               detail=row["file_name"])
+        return error_id
 
 
 def replay_done(conn, quarantine_id: int, outcome: str) -> None:
@@ -289,8 +310,8 @@ def reject(conn, request_id: str, *, expected_version: int | None, actor: str, c
 
 
 def _republish(conn, file_id: str) -> None:
-    conn.execute("UPDATE outbox SET publish_state='PENDING_PUBLISH', emit_seq=emit_seq+1, last_error=NULL WHERE file_id=?",
-                 (file_id,))
+    # last_error is kept: an ongoing publication failure stays visible until a write succeeds.
+    conn.execute("UPDATE outbox SET publish_state='PENDING_PUBLISH', emit_seq=emit_seq+1 WHERE file_id=?", (file_id,))
 
 
 def reemit(conn, request_id: str, *, actor: str, label: str = "") -> str:
@@ -335,6 +356,30 @@ def set_fault(conn, key: str, value: str, *, demo_enabled: bool, actor: str, lab
         prev = get_setting(conn, key)
         conn.execute("UPDATE settings SET value=?, updated_at=? WHERE key=?", (value, now(), key))
         _audit(conn, request_id=None, action="FAULT", prev=f"{key}={prev}", new=f"{key}={value}", actor=actor, label=label)
+
+
+def reset_faults(conn) -> list[str]:
+    """With demo mode off, clear stored fault settings so re-enabling demo mode later does
+    not silently re-arm an old fault. Audited when anything changes."""
+    changed = []
+    with transaction(conn):
+        for key in ("publication_paused", "auto_delay_seconds", "crash_after_commit"):
+            if get_setting(conn, key) != "0":
+                changed.append(f"{key}={get_setting(conn, key)}")
+                conn.execute("UPDATE settings SET value='0', updated_at=? WHERE key=?", (now(), key))
+        if changed:
+            _audit(conn, request_id=None, action="FAULT_RESET", prev=", ".join(changed), new="all off", actor=WORKER,
+                   detail="demo faults disabled in configuration")
+    return changed
+
+
+def after_restore(conn, *, source: str, divergent: list[str]) -> None:
+    """Restored ledgers start in MANUAL so nothing ships automatically before review."""
+    with transaction(conn):
+        prev = get_setting(conn, "mode")
+        conn.execute("UPDATE settings SET value='MANUAL', updated_at=? WHERE key='mode'", (now(),))
+        _audit(conn, request_id=None, action="RESTORE", prev=prev, new="MANUAL", actor=CONSOLE, label="restore",
+               detail=protocol.sanitize(f"{source}; divergent: {', '.join(divergent) or 'none'}", 200))
 
 
 def consume_crash_fault(conn) -> bool:

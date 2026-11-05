@@ -20,11 +20,22 @@ class Status:
     pending_output: int
     publication_failures: int
     demo_faults: dict
+    oldest_pending_age_s: float | None = None      # oldest PENDING request (waiting for operator or AUTO)
+    oldest_unpublished_age_s: float | None = None  # oldest result not yet in outbound/
+    oldest_quarantine_age_s: float | None = None
     conditions: list[str] = field(default_factory=list)
     recent_failures: list[tuple[str, str, str]] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+    def exit_code(self) -> int:
+        """For `box1-erp status --check`: 0 healthy, 1 degraded (attention needed), 2 down."""
+        if self.worker != "RUNNING":
+            return 2
+        if self.publication_failures or self.quarantined:
+            return 1
+        return 0
 
 
 def snapshot(conn, cfg) -> Status:
@@ -51,6 +62,10 @@ def snapshot(conn, cfg) -> Status:
         demo_faults=faults,
         recent_failures=[tuple(r) for r in conn.execute("SELECT at, component, message FROM failures ORDER BY id DESC LIMIT 5")],
     )
+    age = lambda ts: round(time.time() - db.parse_ts(ts), 1) if ts else None  # noqa: E731
+    s.oldest_pending_age_s = age(q("SELECT MIN(created_at) FROM requests WHERE state='PENDING'"))
+    s.oldest_unpublished_age_s = age(q("SELECT MIN(created_at) FROM outbox WHERE publish_state='PENDING_PUBLISH'"))
+    s.oldest_quarantine_age_s = age(q("SELECT MIN(quarantined_at) FROM quarantine WHERE state<>'REPLAYED'"))
     if worker != "RUNNING":
         s.conditions.append(f"WORKER {worker}: imports and publication stopped")
     if s.publication_failures:

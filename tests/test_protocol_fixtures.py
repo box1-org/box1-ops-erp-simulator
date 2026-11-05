@@ -28,7 +28,7 @@ def test_manifest_is_present_and_complete(manifest):
     assert manifest["protocol"] == "ERP1"
     assert len(manifest["files"]) >= 40
     covered = {f["errorCode"] for f in manifest["files"] if not f["valid"]}
-    assert set(protocol.ERROR_CODES) - {"CONFLICTING_REUSE"} <= covered
+    assert set(protocol.ERROR_CODES) - {"CONFLICTING_REUSE", "UNREADABLE"} <= covered  # neither can be a file fixture
 
 
 def test_equivalence(manifest, fixture_bytes):
@@ -69,3 +69,13 @@ def test_mapping_from_fulfillment_requested_event(manifest, fixture_bytes):
             ["TRL", "4"],
         ])
         assert produced == fixture_bytes(m["expected"])
+
+
+def test_code_lists_match_the_specification():
+    """The reader's code lists must equal the ones SPEC.md names (UNREADABLE once drifted)."""
+    import re
+    spec = (fixtures_dir().parent / "SPEC.md").read_text()
+    para = next(line for line in spec.splitlines() if line.startswith("**Error codes**"))
+    assert set(re.findall(r"`([A-Z_]+)`", para)) - {"ERR"} == set(protocol.ERROR_CODES)
+    para = next(line for line in spec.splitlines() if line.startswith("**Rejection reason codes.**"))
+    assert set(re.findall(r"`([A-Z_]+)`", para)) == set(protocol.REJECTION_CODES)

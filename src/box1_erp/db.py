@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import sqlite3
 import time
@@ -25,16 +26,18 @@ CREATE TABLE IF NOT EXISTS requests (
     equivalence_key TEXT NOT NULL,
     state           TEXT NOT NULL CHECK (state IN ('PENDING','HELD','SHIPPED','REJECTED')),
     version         INTEGER NOT NULL DEFAULT 1,
-    shipment_id     TEXT UNIQUE,
+    shipment_id     TEXT UNIQUE REFERENCES shipments(shipment_id),
     reject_code     TEXT,
     reject_text     TEXT,
     raw_request     BLOB NOT NULL,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     CHECK ((state = 'SHIPPED') = (shipment_id IS NOT NULL)),
-    CHECK ((state = 'REJECTED') = (reject_code IS NOT NULL))
+    CHECK ((state = 'REJECTED') = (reject_code IS NOT NULL)),
+    CHECK ((reject_code IS NULL) = (reject_text IS NULL))
 );
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state, created_at);
+CREATE INDEX IF NOT EXISTS requests_updated ON requests(updated_at);
 
 CREATE TABLE IF NOT EXISTS request_lines (
     request_id TEXT NOT NULL REFERENCES requests(request_id),
@@ -68,9 +71,12 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_error    TEXT,
     created_at    TEXT NOT NULL,
     published_at  TEXT,
-    UNIQUE (request_id, revision)
+    UNIQUE (request_id, revision),
+    CHECK (kind <> 'RES' OR (request_id IS NOT NULL AND revision >= 1 AND status IN ('PENDING','HELD','SHIPPED','REJECTED'))),
+    CHECK (kind <> 'ERR' OR revision IS NULL)
 );
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(publish_state, created_at);
+CREATE INDEX IF NOT EXISTS outbox_request ON outbox(request_id, revision);
 
 CREATE TABLE IF NOT EXISTS request_files (
     id          INTEGER PRIMARY KEY,
@@ -79,22 +85,24 @@ CREATE TABLE IF NOT EXISTS request_files (
     file_name   TEXT NOT NULL,
     sha256      TEXT NOT NULL,
     outcome     TEXT NOT NULL,
+    ingest_key  TEXT,                   -- device:inode:mtime of the upload, for crash-safe re-reads
     at          TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS request_files_key ON request_files(ingest_key);
 CREATE INDEX IF NOT EXISTS request_files_request ON request_files(request_id, id);
 
 CREATE TABLE IF NOT EXISTS quarantine (
     id             INTEGER PRIMARY KEY,
     file_name      TEXT NOT NULL,
     stored_name    TEXT NOT NULL UNIQUE,
+    ingest_key     TEXT NOT NULL UNIQUE,  -- one row per upload, so every upload gets its own ERR
     sha256         TEXT NOT NULL,
     error_code     TEXT NOT NULL,
     detail         TEXT NOT NULL,
     request_id     TEXT,
     state          TEXT NOT NULL CHECK (state IN ('QUARANTINED','REPLAY_REQUESTED','REPLAYED')),
     quarantined_at TEXT NOT NULL,
-    replayed_at    TEXT,
-    UNIQUE (file_name, sha256)
+    replayed_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit (
@@ -133,6 +141,9 @@ CREATE TABLE IF NOT EXISTS failures (
 );
 """
 
+# (version, [statements]) applied in order to ledgers below that version. v1 is the initial schema.
+MIGRATIONS: list[tuple[int, list[str]]] = []
+
 DEFAULT_SETTINGS = {
     "mode": "MANUAL",
     "publication_paused": "0",
@@ -151,6 +162,10 @@ def parse_ts(value: str) -> float:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC).timestamp()
 
 
+class SchemaMismatch(RuntimeError):
+    """The ledger's schema version differs from this code's. Run `box1-erp migrate`."""
+
+
 class MissingDatabase(RuntimeError):
     """The ledger does not exist and creation was not requested (e.g. data volume not mounted)."""
 
@@ -166,11 +181,48 @@ def connect(path: str, *, create: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA foreign_keys=ON")
+    if not create:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:
+            conn.close()
+            raise SchemaMismatch(f"ledger schema {version}, code expects {SCHEMA_VERSION}; run `box1-erp migrate`"
+                                 if version < SCHEMA_VERSION else
+                                 f"ledger schema {version} is newer than this code ({SCHEMA_VERSION}); refusing to open")
     return conn
 
 
+def lock_path(ledger: str) -> str:
+    return os.path.join(os.path.dirname(ledger), "ledger.lock")
+
+
+class LedgerLock:
+    """Shared while a worker or console has the ledger open; exclusive for restore and
+    migrate, which therefore refuse while any worker or console is running (even a hung one)."""
+
+    def __init__(self, ledger: str, exclusive: bool = False):
+        self.path = lock_path(ledger)
+        self.exclusive = exclusive
+        self.fd: int | None = None
+
+    def acquire(self) -> bool:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o640)
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return False
+        self.fd = fd
+        return True
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
 def initialize(path: str) -> None:
-    """Create or upgrade the schema. Safe to run repeatedly."""
+    """Create the schema (CREATE ... IF NOT EXISTS), or bring an older ledger to SCHEMA_VERSION.
+    Safe to run repeatedly. Future versions add ordered steps to MIGRATIONS."""
     conn = connect(path, create=True)
     try:
         with transaction(conn):
@@ -182,6 +234,13 @@ def initialize(path: str) -> None:
             for k, v in DEFAULT_SETTINGS.items():
                 conn.execute("INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES (?,?,?)", (k, v, ts))
             conn.execute("INSERT OR IGNORE INTO worker_status(id) VALUES (1)")
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current > SCHEMA_VERSION:
+                raise SchemaMismatch(f"ledger schema {current} is newer than this code ({SCHEMA_VERSION})")
+            for version, steps in MIGRATIONS:
+                if current < version <= SCHEMA_VERSION:
+                    for step in steps:
+                        conn.execute(step)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     finally:
         conn.close()
@@ -202,10 +261,23 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        _rollback(conn)
         raise
-    else:
+    try:
         conn.execute("COMMIT")
+    except BaseException:
+        # A failed COMMIT (disk full, I/O error) leaves the transaction open and the write
+        # lock held; roll back so this connection and the other process can continue.
+        _rollback(conn)
+        raise
+
+
+def _rollback(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass  # keep the original exception
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> str:

@@ -1,8 +1,9 @@
 # /etc/box1-erp/erp.conf  (root:box1erp 0640; the application only reads it)
 [paths]
-# Ledger, spool and backups. Must be on the data volume.
-state_dir = /var/lib/box1-erp
-# SFTP exchange: inbound/, outbound/, consumed/. Same data volume.
+# One data volume is mounted at /srv/box1-erp (root:root 0755).
+# Ledger, spool and backups: private to box1erp.
+state_dir = /srv/box1-erp/state
+# SFTP exchange and chroot: inbound/, outbound/, consumed/. Same volume, so moves are renames.
 exchange_dir = /srv/box1-erp/exchange
 
 [demo]

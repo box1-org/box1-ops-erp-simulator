@@ -3,13 +3,17 @@ Description=box1 legacy ERP worker (file ingestion, AUTO processing, result publ
 Documentation=file:/usr/share/doc/box1-erp/RUNBOOK.md
 # The ledger and the exchange live on the data volume (#25). Without the mount the
 # worker must not start: it never creates a ledger (exit 2, no restart).
-RequiresMountsFor=/var/lib/box1-erp /srv/box1-erp
+RequiresMountsFor=/srv/box1-erp
 After=local-fs.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# No hard start limit: restarts back off from 5 s to 5 min, so a transient fault
+# (volume late, disk full) recovers on its own without a restart storm.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+# The worker pings the watchdog at least every 2 s; a hung worker is killed and restarted.
+WatchdogSec=60
 User=box1erp
 Group=box1erp
 SupplementaryGroups=erpxfer
@@ -20,6 +24,8 @@ ExecStart=/usr/lib/box1-erp/venv/bin/box1-erp worker
 # ledger or data volume: stay down and visible rather than restart in a loop.
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=300
 RestartPreventExitStatus=2
 TimeoutStopSec=30
 StandardOutput=journal
@@ -30,7 +36,8 @@ MemoryMax=256M
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
-ReadWritePaths=/var/lib/box1-erp /srv/box1-erp/exchange
+ReadWritePaths=/srv/box1-erp/state /srv/box1-erp/exchange
+ReadOnlyPaths=/srv/box1-erp/state/backups
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -47,6 +54,11 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
 
 [Install]
 WantedBy=box1-erp.target

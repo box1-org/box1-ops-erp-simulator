@@ -19,9 +19,10 @@ Adapter <--SFTP-- outbound/ <-- worker (results, error files)
 | `src/box1_erp/tui.py` | `box1-erp-tui@.service`: the operator console |
 | `src/box1_erp/backup.py` | Application-consistent backup and restore |
 | `systemd/` | The two application units |
-| `packaging/` | sysusers, tmpfiles and a reference sshd snippet for #25 |
+| `packaging/` | sysusers (fixed IDs), the data-volume provisioning script and a reference sshd snippet for #25 |
 | `config/erp.conf.example` | `/etc/box1-erp/erp.conf` |
-| `harness/` | Container harness (CentOS Stream 10, systemd, OpenSSH). Not a substitute for the VM |
+| `harness/` | Container harness (CentOS Stream 10, systemd, OpenSSH, a data volume). Not a substitute for the VM |
+| `.tekton/` | Pipelines as Code PR and release runs, inert until the repository is registered (D-002) |
 | `docs/RUNBOOK.md` | Operating and recovering the appliance |
 | `docs/VM-INTEGRATION.md` | What #25 installs, and what it must prove in the VM |
 | `docs/DESIGN.md` | States, transitions, ledger, durability and fault design |

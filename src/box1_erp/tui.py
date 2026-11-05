@@ -47,6 +47,12 @@ def cursor(visible: int) -> None:
         pass
 
 
+def fit(value, width: int) -> str:
+    """ASCII-safe, padded to width; a cut value ends in '~' so truncation is visible."""
+    s = asc(value)
+    return (s[: width - 1] + "~") if len(s) > width else s.ljust(width)
+
+
 def short_time(ts: str | None) -> str:
     return ts[11:19] if ts else "-"
 
@@ -65,22 +71,38 @@ class Tui:
         self.search = ""
         self.message = "Ready."
         self.status = None
+        self.lock = None
+        self._seen = None  # (data_version, filter, search) of the rows on screen
+        self.dirty = True
 
     # ------------------------------------------------------------ data
 
     def ensure_conn(self) -> bool:
         if self.conn is not None:
             return True
+        lock = db.LedgerLock(str(self.cfg.ledger))
         try:
+            if not lock.acquire():
+                self.message = "Ledger locked: a restore or migration is in progress."
+                return False
             self.conn = db.connect(str(self.cfg.ledger))
+            self.lock = lock
+            self.dirty = True
             return True
-        except (db.MissingDatabase, OSError) as exc:
+        except (db.MissingDatabase, db.SchemaMismatch, OSError) as exc:
+            lock.release()
             self.message = f"Ledger unavailable: {exc}"
             return False
 
     def load(self) -> None:
+        self.status = snapshot(self.conn, self.cfg)
+        seen = (self.conn.execute("PRAGMA data_version").fetchone()[0], self.filter, self.search)
+        if seen == self._seen and not self.dirty:
+            return  # nothing changed since the last read (other connections bump data_version)
+        self._seen, self.dirty = seen, False
         sql = ("SELECT r.request_id, r.order_id, r.state, r.version, r.shipment_id, r.site_id, r.origin, r.updated_at,"
-               " (SELECT o.publish_state FROM outbox o WHERE o.request_id=r.request_id AND o.kind='RES'"
+               " (SELECT CASE WHEN o.last_error IS NOT NULL AND o.publish_state='PENDING_PUBLISH' THEN 'FAIL'"
+               "  ELSE o.publish_state END FROM outbox o WHERE o.request_id=r.request_id AND o.kind='RES'"
                "  ORDER BY o.revision DESC LIMIT 1) AS pub,"
                " (SELECT COUNT(*) FROM request_lines l WHERE l.request_id=r.request_id) AS nlines"
                " FROM requests r WHERE 1=1")
@@ -93,7 +115,6 @@ class Tui:
             args += [f"%{self.search}%"] * 4
         sql += " ORDER BY r.updated_at DESC, r.request_id LIMIT 1000"
         self.rows = self.conn.execute(sql, args).fetchall()
-        self.status = snapshot(self.conn, self.cfg)
         self.sel = max(0, min(self.sel, len(self.rows) - 1))
 
     def current(self):
@@ -146,7 +167,7 @@ class Tui:
         h, w = self.scr.getmaxyx()
         self.header()
         self.put(3, 0, asc(f"Filter: {self.filter}  Find: {self.search or '-'}  {len(self.rows)} request(s)", w - 1))
-        cols = f"{'REQUEST':<21}{'ORDER':<15}{'STATE':<9}{'SHIPMENT':<13}{'SITE':<9}{'UPDATED':<9}{'OUT'}"
+        cols = f"{'REQUEST':<19}{'ORDER':<13}{'STATE':<9}{'SHIPMENT':<12}{'SITE':<8}{'O':<2}{'LN':<3}{'UPDATED':<9}{'OUT'}"
         self.put(4, 0, asc(cols, w - 1), curses.A_UNDERLINE)
         body = h - 7
         if self.sel < self.top:
@@ -155,11 +176,12 @@ class Tui:
             self.top = self.sel - body + 1
         for i, r in enumerate(self.rows[self.top:self.top + body]):
             idx = self.top + i
-            pub = {"PUBLISHED": "OK", "PENDING_PUBLISH": "WAIT"}.get(r["pub"], "-")
-            # 21+15+9+13+9+9+3 = 79 columns (the last cell of a line is not written)
-            line = (asc(r["request_id"], 20) + " " + asc(r["order_id"], 14) + " " + asc(r["state"], 8) + " "
-                    + asc(r["shipment_id"] or "-", 12) + " " + asc(r["site_id"], 8) + " " + short_time(r["updated_at"]).ljust(9)
-                    + asc(pub, 4))
+            pub = {"PUBLISHED": "OK", "PENDING_PUBLISH": "WAIT", "FAIL": "FAIL"}.get(r["pub"], "-")
+            origin = {"EVENT": "E", "API": "A"}.get(r["origin"], "?")
+            # 19+13+9+12+8+2+3+9+4 = 79 columns (the last cell of a line is not written). O: E=event, A=API.
+            line = (fit(r["request_id"], 18) + " " + fit(r["order_id"], 12) + " " + fit(r["state"], 8) + " "
+                    + fit(r["shipment_id"] or "-", 11) + " " + fit(r["site_id"], 7) + " " + origin + " "
+                    + fit(r["nlines"], 2) + " " + short_time(r["updated_at"]).ljust(9) + asc(pub, 4))
             self.put(5 + i, 0, asc(line, w - 1), curses.A_REVERSE if idx == self.sel else 0)
         if not self.rows:
             self.put(6, 2, "No requests match.")
@@ -210,9 +232,11 @@ class Tui:
     def act(self, fn, done: str) -> None:
         try:
             result = fn()
+            self.dirty = True
             self.message = done.format(result=result)
             self.log.info("console action", message=self.message, label=self.label)
         except domain.StaleVersion as exc:
+            self.dirty = True
             self.message = f"Not done: {exc}"
         except domain.DomainError as exc:
             self.message = f"Not done: {exc}"
@@ -406,17 +430,17 @@ class Tui:
                 curses.update_lines_cols()
             elif k == "1":
                 new = "0" if f["publication_paused"] == "1" else "1"
-                self.act(lambda: domain.set_fault(self.conn, "publication_paused", new, demo_enabled=True,
+                self.act(lambda: domain.set_fault(self.conn, "publication_paused", new, demo_enabled=self.cfg.demo_faults,
                                                   actor=domain.CONSOLE, label=self.label), "Publication fault changed.")
             elif k == "2":
                 new = "0" if f["crash_after_commit"] == "1" else "1"
                 if new == "0" or self.confirm("Arm a one-shot worker crash after the next shipment commit?"):
-                    self.act(lambda: domain.set_fault(self.conn, "crash_after_commit", new, demo_enabled=True,
+                    self.act(lambda: domain.set_fault(self.conn, "crash_after_commit", new, demo_enabled=self.cfg.demo_faults,
                                                       actor=domain.CONSOLE, label=self.label), "Crash fault changed.")
             elif k == "3":
                 v = self.prompt("Delay seconds (0-3600):", 4, "0123456789")
                 if v:
-                    self.act(lambda: domain.set_fault(self.conn, "auto_delay_seconds", str(int(v)), demo_enabled=True,
+                    self.act(lambda: domain.set_fault(self.conn, "auto_delay_seconds", str(int(v)), demo_enabled=self.cfg.demo_faults,
                                                       actor=domain.CONSOLE, label=self.label), "Delay changed.")
 
     def help_screen(self) -> None:
@@ -426,6 +450,8 @@ class Tui:
                 "H  hold (stops AUTO)         L  release to PENDING      S  ship (confirm)",
                 "R  reject: code, reason, confirm                        E  re-emit latest result",
                 "M  switch MANUAL/AUTO        Q  quarantined files       X  demo faults (if enabled)",
+                "Columns: O = origin (E event, A API), LN = line items, OUT = result publication",
+                "(OK published, WAIT pending, FAIL write failing). A '~' marks a cut value.",
                 "",
                 "The operator label is an audit label, not an authenticated identity.",
                 "SHIPPED and REJECTED are final. Re-emit never creates a shipment.",
