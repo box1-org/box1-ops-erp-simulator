@@ -52,15 +52,29 @@ spec:
                 #!/bin/sh
                 set -eu
                 echo "$REVISION" | grep -Eq '^[a-f0-9]{40}$'
+                untar() {  # untar <archive> <dir>: strip the top directory; the image has no tar or gzip
+                  python3 - "$1" "$2" <<'PY'
+                import sys, tarfile
+                src, dst = sys.argv[1], sys.argv[2]
+                with tarfile.open(src) as t:
+                    members = []
+                    for m in t.getmembers():
+                        parts = m.name.split("/", 1)
+                        if len(parts) == 2 and parts[1]:
+                            m.name = parts[1]
+                            members.append(m)
+                    t.extractall(dst, members=members, filter="data")
+                PY
+                }
                 mkdir -p source
-                curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-                  "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION" \
-                  | tar -xz --strip-components=1 -C source
+                curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /workspace/src.tgz \
+                  "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION"
+                untar /workspace/src.tgz source
                 sha=$(sed -n 's/^commit=//p' source/contracts.lock)
                 echo "$sha" | grep -Eq '^[a-f0-9]{40}$'
                 mkdir -p source/.contracts
-                curl -fsSL "https://codeload.github.com/box1-org/box1-ops-contracts/tar.gz/$sha" \
-                  | tar -xz --strip-components=1 -C source/.contracts
+                curl -fsSL -o /workspace/contracts.tgz "https://codeload.github.com/box1-org/box1-ops-contracts/tar.gz/$sha"
+                untar /workspace/contracts.tgz source/.contracts
                 printf 'Fetched %s with box1-ops-contracts %s\n' "$REVISION" "$sha"
             - name: test
               script: |

@@ -1,12 +1,13 @@
 # Release on push to main (D-002, D-011):
 #   test     - the PR checks again on the merged revision
-#   package  - wheel + units + packaging + SHA256SUMS in a FROM-scratch OCI image,
+#   package  - wheel + units + packaging + SHA256SUMS in a one-layer OCI image (no base),
 #              pushed to box1-ci/box1-ops-erp-simulator by digest
 #   security - central box1-security-gates (SBOM to TPA, ACS scan), observe mode
 # #25 pins the resulting digest in its bootc Containerfile. There is no promote task:
 # the appliance is not deployed by Argo CD.
 # Inert until the Repository CR and a ci-erp-release service account exist (D-002).
-# NOT YET RUN: the buildah step is drafted unprivileged with vfs storage and is unverified.
+# NOT YET RUN on the cluster. scripts/make-oci-layout.py and the skopeo copy were checked locally
+# (reproducible digest; skopeo reads the layout); the in-cluster push and RBAC are unverified.
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
@@ -88,14 +89,28 @@ spec:
                 #!/bin/sh
                 set -eu
                 echo "$REVISION" | grep -Eq '^[a-f0-9]{40}$'
+                untar() {  # untar <archive> <dir>: strip the top directory; the image has no tar or gzip
+                  python3 - "$1" "$2" <<'PY'
+                import sys, tarfile
+                src, dst = sys.argv[1], sys.argv[2]
+                with tarfile.open(src) as t:
+                    members = []
+                    for m in t.getmembers():
+                        parts = m.name.split("/", 1)
+                        if len(parts) == 2 and parts[1]:
+                            m.name = parts[1]
+                            members.append(m)
+                    t.extractall(dst, members=members, filter="data")
+                PY
+                }
                 mkdir -p source
-                curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-                  "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION" \
-                  | tar -xz --strip-components=1 -C source
+                curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /workspace/src.tgz \
+                  "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION"
+                untar /workspace/src.tgz source
                 sha=$(sed -n 's/^commit=//p' source/contracts.lock)
                 mkdir -p source/.contracts
-                curl -fsSL "https://codeload.github.com/box1-org/box1-ops-contracts/tar.gz/$sha" \
-                  | tar -xz --strip-components=1 -C source/.contracts
+                curl -fsSL -o /workspace/contracts.tgz "https://codeload.github.com/box1-org/box1-ops-contracts/tar.gz/$sha"
+                untar /workspace/contracts.tgz source/.contracts
             - name: test-and-build
               image: registry.access.redhat.com/ubi10/python-312-minimal@sha256:7a3ccd58d8a660d782e8705585aaea2ffe2f2a5d3285507a265dae7d0302b233
               script: |
@@ -105,29 +120,29 @@ spec:
                 /workspace/venv/bin/pip install --quiet --require-virtualenv -r requirements-dev.txt
                 /workspace/venv/bin/ruff check src tests
                 /workspace/venv/bin/pytest -q -p no:cacheprovider
-                # Reproducible wheel timestamps: the commit time of the revision is not available
-                # without git here, so use a fixed epoch; contents still change with the source.
+                # Fixed timestamps: the same source gives the same wheel and image digest.
                 SOURCE_DATE_EPOCH=315532800 /workspace/venv/bin/python -m build --wheel --outdir /workspace/bundle .
                 cp -r systemd packaging config docs/VM-INTEGRATION.md docs/RUNBOOK.md /workspace/bundle/
                 (cd /workspace/bundle && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
                 sha256sum /workspace/bundle/*.whl | cut -d' ' -f1 | tr -d '\n' > "$(results.wheel-sha256.path)"
+                python3 scripts/make-oci-layout.py /workspace/bundle /workspace/oci "$REVISION"
             - name: push
-              image: registry.access.redhat.com/ubi9/buildah@sha256:12ab6d225aef49ceed4c7b39e7ab207c4b7f4a67b7dba04a61efbac92c01b8b8
-              env:
-                - name: STORAGE_DRIVER
-                  value: vfs
-                - name: BUILDAH_ISOLATION
-                  value: chroot
+              # Unprivileged: the image is assembled as an OCI layout in Python; skopeo only copies it.
+              image: registry.access.redhat.com/ubi9/skopeo@sha256:fd3d5c37f5d204af77d02e2743a10e538a9d1e8b67d8736eff86b9be4c564e1f
               script: |
                 #!/bin/sh
                 set -eu
                 IMAGE=image-registry.openshift-image-registry.svc:5000/box1-ci/box1-ops-erp-simulator
-                printf 'FROM scratch\nCOPY bundle/ /\nLABEL org.opencontainers.image.revision=%s\n' "$REVISION" > /workspace/Containerfile
-                buildah build --layers=false -f /workspace/Containerfile -t "$IMAGE:$REVISION" /workspace
-                buildah push --digestfile /workspace/digest "$IMAGE:$REVISION" "docker://$IMAGE:$REVISION"
-                tr -d '\n' < /workspace/digest > "$(results.image-digest.path)"
+                mkdir -p /workspace/certs
+                cp /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt /workspace/certs/ca.crt
+                token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                skopeo copy --dest-cert-dir /workspace/certs --dest-creds "serviceaccount:$token" \
+                  --digestfile /workspace/digest oci:/workspace/oci:latest "docker://$IMAGE:$REVISION"
+                digest=$(cat /workspace/digest)
+                echo "$digest" | grep -Eq '^sha256:[a-f0-9]{64}$'
+                printf '%s' "$digest" > "$(results.image-digest.path)"
                 printf '%s' "$IMAGE" > "$(results.image-url.path)"
-                printf 'Pushed %s@%s\n' "$IMAGE" "$(cat /workspace/digest)"
+                printf 'Published %s@%s\n' "$IMAGE" "$digest"
       - name: security
         runAfter: [package]
         taskRef:
