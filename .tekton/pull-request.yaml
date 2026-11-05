@@ -1,0 +1,74 @@
+# PR check: lint, the full test suite against the pinned ERP1 fixtures, and a wheel build.
+# Inert until box1-gitops registers a Pipelines as Code Repository for this repo (D-002).
+# NOT YET RUN: drafted from rhel-image-poc's .tekton pattern; first run is part of D-002.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: box1-ops-erp-simulator-pr-
+  labels:
+    backstage.io/kubernetes-id: box1-ops-erp-simulator
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[pull_request]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/target-namespace: box1-ci
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+spec:
+  taskRunTemplate:
+    serviceAccountName: ci-test
+  timeouts:
+    pipeline: 20m
+  pipelineSpec:
+    tasks:
+      - name: check
+        retries: 1   # PAC can briefly create the run before its git auth Secret.
+        taskSpec:
+          volumes:
+            - name: workspace
+              emptyDir: {}
+          stepTemplate:
+            image: registry.access.redhat.com/ubi10/python-312-minimal@sha256:7a3ccd58d8a660d782e8705585aaea2ffe2f2a5d3285507a265dae7d0302b233
+            workingDir: /workspace/source
+            computeResources:
+              requests: {cpu: 250m, memory: 512Mi}
+              limits: {cpu: "1", memory: 1Gi}
+            env:
+              - name: REVISION
+                value: "{{revision}}"
+              - name: HOME
+                value: /workspace
+            volumeMounts:
+              - name: workspace
+                mountPath: /workspace
+          steps:
+            - name: fetch
+              workingDir: /workspace
+              env:
+                - name: GITHUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{git_auth_secret}}"
+                      key: git-provider-token
+              script: |
+                #!/bin/sh
+                set -eu
+                echo "$REVISION" | grep -Eq '^[a-f0-9]{40}$'
+                mkdir -p source
+                curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION" \
+                  | tar -xz --strip-components=1 -C source
+                sha=$(sed -n 's/^commit=//p' source/contracts.lock)
+                echo "$sha" | grep -Eq '^[a-f0-9]{40}$'
+                mkdir -p source/.contracts
+                curl -fsSL "https://codeload.github.com/box1-org/box1-ops-contracts/tar.gz/$sha" \
+                  | tar -xz --strip-components=1 -C source/.contracts
+                printf 'Fetched %s with box1-ops-contracts %s\n' "$REVISION" "$sha"
+            - name: test
+              script: |
+                #!/bin/sh
+                set -eu
+                python3 -m venv /workspace/venv
+                /workspace/venv/bin/pip install --quiet --require-virtualenv -r requirements-dev.txt
+                /workspace/venv/bin/ruff check src tests
+                /workspace/venv/bin/pytest -q -p no:cacheprovider
+                SOURCE_DATE_EPOCH=$(date +%s) /workspace/venv/bin/python -m build --wheel --outdir /workspace/dist .
+                sha256sum /workspace/dist/*.whl
