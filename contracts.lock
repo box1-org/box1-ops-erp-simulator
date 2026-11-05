@@ -1,0 +1,3 @@
+repository=https://github.com/box1-org/box1-ops-contracts.git
+# PR head until box1-ops-contracts#6 merges; repin to the merge commit afterwards.
+commit=b20694c8971169025e345a3bcf0843e260096bc3

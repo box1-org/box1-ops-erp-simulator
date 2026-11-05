@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "box1-ops-erp-simulator"
+version = "0.1.0"
+description = "Box1 legacy ERP appliance: curses console, SQLite ledger and ERP1 file exchange over SFTP"
+requires-python = ">=3.12"
+dependencies = []  # standard library only; the guest installs nothing from the internet
+
+[project.scripts]
+box1-erp = "box1_erp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+
+[tool.ruff]
+line-length = 150
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = ["S101", "S603", "S607", "S311"]
+
+[tool.ruff.lint.per-file-ignores]
+# act() calls each lambda immediately, inside the same loop iteration.
+"src/box1_erp/tui.py" = ["B023"]
