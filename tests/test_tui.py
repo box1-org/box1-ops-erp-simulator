@@ -267,3 +267,51 @@ def test_demo_fault_screen_arms_and_shows_faults(appliance):
         assert actions == ["publication_paused=1", "crash_after_commit=1"]
     finally:
         c.close()
+
+
+def test_ctrl_l_and_g_repaint_a_garbled_screen_on_every_screen(appliance):
+    """Noise on the serial line or a reconnected `virtctl console` changes what the
+    operator sees without curses knowing. Ctrl-L (anywhere) and G must redraw every cell,
+    including cells that did not change, and must not leave the prompt or screen."""
+    cfg, path = appliance
+    seed(cfg, 1)
+    c = Console(path)
+
+    def garble():
+        # Only the terminal emulator sees this; the TUI's idea of the screen is unchanged.
+        c.stream.feed(b"\x1b[2J\x1b[H" + b"#" * 400)
+        assert "REQUEST" not in c.text() and "Enter=Detail" not in c.text()
+
+    try:
+        c.wait_text("Pending 1")
+        garble()
+        c.pump(2.5)  # periodic refreshes send only the cells that changed (the clock)
+        assert "Enter=Detail" not in c.text(), "precondition: an ordinary refresh does not repair the screen"
+        c.keys(b"\x0c")
+        screen = c.wait_text("Enter=Detail")
+        assert "REQUEST" in screen and "#" not in screen
+
+        garble()
+        c.keys(b"g")
+        screen = c.wait_text("Refreshed and redrawn.")
+        assert "Enter=Detail" in screen and "#" not in screen
+
+        c.keys(b"/")
+        c.wait_text("Find:")
+        c.keys(b"ful")
+        garble()
+        c.keys(b"\x0c")
+        screen = c.wait_text("Find: ful")
+        assert "REQUEST" in screen and "#" not in screen, "Ctrl-L in a prompt repaints the screen behind it"
+        c.keys(b"_1\r")
+        c.wait_text("Find: ful_1")
+
+        c.keys(b"\r")
+        c.wait_text("== Lines")
+        garble()
+        c.keys(b"\x0c")
+        screen = c.wait_text("== Lines")
+        assert "B/Esc=Back" in screen and "#" not in screen
+        assert c.proc.poll() is None
+    finally:
+        c.close()

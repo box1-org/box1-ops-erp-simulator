@@ -191,11 +191,30 @@ class Tui:
     # ------------------------------------------------------------ input helpers
 
     def getkey(self, timeout_ms: int = 1000):
+        """Next key, or None on timeout. Ctrl-L is handled here, so it works on every
+        screen and in prompts: it repaints and is not passed on."""
         self.scr.timeout(timeout_ms)
         try:
-            return self.scr.get_wch()
+            k = self.scr.get_wch()
         except curses.error:
             return None
+        if k == "\x0c":
+            self.repaint()
+            return None
+        return k
+
+    def repaint(self) -> None:
+        """Reset the terminal and redraw every cell (Ctrl-L, G). curses normally sends only
+        the cells it believes changed, so noise on a serial line, kernel messages on the
+        console or a reconnected `virtctl console` stay on screen until this runs.
+        endwin() + refresh() re-sends the terminal init strings and restores raw/keypad
+        modes; clearok() makes the next refresh clear the screen and send everything."""
+        curses.endwin()
+        self.scr.refresh()
+        curses.update_lines_cols()
+        self.scr.keypad(True)
+        self.scr.clearok(True)
+        self.scr.refresh()
 
     def prompt(self, question: str, max_len: int = 60, allowed=None, single: bool = False) -> str | None:
         """Line editor on the message line. Enter accepts, Esc cancels. Printable ASCII only.
@@ -446,7 +465,7 @@ class Tui:
     def help_screen(self) -> None:
         text = ["CONSOLE HELP", "",
                 "Up/Down or J/K  move        Enter  request detail       / find (ID, order, site)",
-                "F  cycle state filter        G  refresh now            N  set operator label",
+                "F  cycle state filter        G  refresh and redraw     N  set operator label",
                 "H  hold (stops AUTO)         L  release to PENDING      S  ship (confirm)",
                 "R  reject: code, reason, confirm                        E  re-emit latest result",
                 "M  switch MANUAL/AUTO        Q  quarantined files       X  demo faults (if enabled)",
@@ -455,6 +474,7 @@ class Tui:
                 "",
                 "The operator label is an audit label, not an authenticated identity.",
                 "SHIPPED and REJECTED are final. Re-emit never creates a shipment.",
+                "Ctrl-L redraws the whole screen on any screen (after noise or a reconnect).",
                 "This console has no exit: closing it leaves the worker running.",
                 "", "Press any key."]
         self.scr.erase()
@@ -533,7 +553,8 @@ class Tui:
                 elif c == "?":
                     self.help_screen()
                 elif c == "g":
-                    self.message = "Refreshed."
+                    self.message = "Refreshed and redrawn."
+                    self.repaint()
 
 
 def main(cfg: Config, label: str = "") -> int:

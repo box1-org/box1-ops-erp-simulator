@@ -29,6 +29,7 @@ The console starts without a login on the VM console. Anyone who can open the VM
 ## Console
 
 - Restart: `systemctl restart box1-erp-tui@ttyS0` (or the selected TTY). The worker is unaffected.
+- **Garbled screen** (line noise, kernel messages on the serial console, or leftovers after reconnecting `virtctl console`): press **Ctrl-L** on any screen, including at a prompt, or `G` on the request list. Either one resets the terminal modes and redraws every cell. No restart is needed.
 - The console has no exit key and ignores Ctrl-C, Ctrl-Z and Ctrl-\. Exiting or crashing returns to the console after 2 s, backing off to 1 min if it keeps failing. It is never left stopped for good.
 - **Broken console** (blank, or restarting): log in through administrative SSH, read `journalctl -u box1-erp-tui@ttyS0 -n 30`, fix the cause (config readable by `box1erp`? `TERM` correct for the console?), then `systemctl restart box1-erp-tui@ttyS0`. As a last resort, `systemctl stop box1-erp-tui@ttyS0 && systemctl start serial-getty@ttyS0` gives a login prompt on that console; return with `systemctl stop serial-getty@ttyS0 && systemctl start box1-erp-tui@ttyS0`.
 
