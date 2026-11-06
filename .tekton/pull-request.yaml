@@ -63,10 +63,21 @@ spec:
                         if len(parts) == 2 and parts[1]:
                             m.name = parts[1]
                             members.append(m)
-                    t.extractall(dst, members=members, filter="data")
+                    try:
+                        t.extractall(dst, members=members, filter="data")
+                    except OSError as exc:
+                        import os
+                        print(f"extract failed: {exc}; uid={os.getuid()} gid={os.getgid()} groups={os.getgroups()}", file=sys.stderr)
+                        for d in (dst, os.path.dirname(os.path.abspath(dst))):
+                            st = os.stat(d)
+                            print(f"  {d}: mode={oct(st.st_mode)} uid={st.st_uid} gid={st.st_gid} writable={os.access(d, os.W_OK)}", file=sys.stderr)
+                        raise
                 PY
                 }
+                # diagnostics for the first in-cluster runs (box1-docs#14)
+                id; umask; ls -ldn /workspace; mount | grep ' /workspace ' || true
                 mkdir -p source
+                ls -ldn source; touch source/.probe && echo "probe write ok" && rm source/.probe
                 curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /workspace/src.tgz \
                   "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION"
                 untar /workspace/src.tgz source
