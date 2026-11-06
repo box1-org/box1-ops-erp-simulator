@@ -7,8 +7,11 @@ TEKTON = Path(__file__).resolve().parents[1] / ".tekton"
 
 def test_steps_never_use_a_subdirectory_of_the_shared_volume_as_working_dir():
     """The container runtime creates a missing workingDir as root when the pod starts, before
-    any step runs, so a non-root fetch step cannot write into it (Permission denied)."""
+    any step runs, so a non-root fetch step cannot write into it (Permission denied).
+    Thin triggers that only reference a pipeline (release.yaml) have no steps to check."""
     for f in TEKTON.glob("*.yaml"):
+        if not re.search(r"^\s*steps:", f.read_text(), re.M):
+            continue
         dirs = re.findall(r"^\s*workingDir:\s*(\S+)", f.read_text(), re.M)
         assert dirs, f
         assert set(dirs) == {"/workspace"}, (f.name, dirs)
