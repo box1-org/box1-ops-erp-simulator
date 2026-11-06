@@ -40,6 +40,11 @@ spec:
       - name: security-gates
         type: string
         default: observe
+    results:
+      # Read by the OpenShift Pipelines console Vulnerabilities column. Emitted
+      # only when box1-security-gates produced a scan summary; otherwise "-".
+      - name: SCAN_OUTPUT
+        value: "$(tasks.security.results.SCAN_OUTPUT)"
     tasks:
       - name: package
         retries: 1
