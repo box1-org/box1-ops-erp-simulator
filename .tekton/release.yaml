@@ -63,7 +63,10 @@ spec:
             - name: workspace
               emptyDir: {}
           stepTemplate:
-            workingDir: /workspace/source
+            # Every step works in /workspace itself. Tekton creates all step containers at pod start,
+            # and the container runtime creates a missing working directory as root, so a
+            # subdirectory here would exist, root-owned, before fetch could create it (box1-docs#14).
+            workingDir: /workspace
             computeResources:
               requests: {cpu: 250m, memory: 512Mi}
               limits: {cpu: "1", memory: 1Gi}
@@ -78,7 +81,6 @@ spec:
           steps:
             - name: fetch
               image: registry.access.redhat.com/ubi10/python-312-minimal@sha256:7a3ccd58d8a660d782e8705585aaea2ffe2f2a5d3285507a265dae7d0302b233
-              workingDir: /workspace
               env:
                 - name: GITHUB_TOKEN
                   valueFrom:
@@ -116,6 +118,7 @@ spec:
               script: |
                 #!/bin/sh
                 set -eu
+                cd /workspace/source
                 python3 -m venv /workspace/venv
                 /workspace/venv/bin/pip install --quiet --require-virtualenv -r requirements-dev.txt
                 /workspace/venv/bin/ruff check src tests
