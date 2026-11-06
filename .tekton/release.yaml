@@ -63,7 +63,10 @@ spec:
             - name: workspace
               emptyDir: {}
           stepTemplate:
-            workingDir: /workspace/source
+            # Every step works in /workspace itself. Tekton creates all step containers at pod start,
+            # and the container runtime creates a missing working directory as root, so a
+            # subdirectory here would exist, root-owned, before fetch could create it (box1-docs#14).
+            workingDir: /workspace
             computeResources:
               requests: {cpu: 250m, memory: 512Mi}
               limits: {cpu: "1", memory: 1Gi}
@@ -78,7 +81,6 @@ spec:
           steps:
             - name: fetch
               image: registry.access.redhat.com/ubi10/python-312-minimal@sha256:7a3ccd58d8a660d782e8705585aaea2ffe2f2a5d3285507a265dae7d0302b233
-              workingDir: /workspace
               env:
                 - name: GITHUB_TOKEN
                   valueFrom:
@@ -100,21 +102,10 @@ spec:
                         if len(parts) == 2 and parts[1]:
                             m.name = parts[1]
                             members.append(m)
-                    try:
-                        t.extractall(dst, members=members, filter="data")
-                    except OSError as exc:
-                        import os
-                        print(f"extract failed: {exc}; uid={os.getuid()} gid={os.getgid()} groups={os.getgroups()}", file=sys.stderr)
-                        for d in (dst, os.path.dirname(os.path.abspath(dst))):
-                            st = os.stat(d)
-                            print(f"  {d}: mode={oct(st.st_mode)} uid={st.st_uid} gid={st.st_gid} writable={os.access(d, os.W_OK)}", file=sys.stderr)
-                        raise
+                    t.extractall(dst, members=members, filter="data")
                 PY
                 }
-                # diagnostics for the first in-cluster runs (box1-docs#14)
-                id; umask; ls -ldn /workspace; mount | grep ' /workspace ' || true
                 mkdir -p source
-                ls -ldn source; touch source/.probe && echo "probe write ok" && rm source/.probe
                 curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /workspace/src.tgz \
                   "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION"
                 untar /workspace/src.tgz source
@@ -127,6 +118,7 @@ spec:
               script: |
                 #!/bin/sh
                 set -eu
+                cd /workspace/source
                 python3 -m venv /workspace/venv
                 /workspace/venv/bin/pip install --quiet --require-virtualenv -r requirements-dev.txt
                 /workspace/venv/bin/ruff check src tests
