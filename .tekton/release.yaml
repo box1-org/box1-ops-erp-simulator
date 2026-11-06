@@ -1,13 +1,13 @@
-# Release on push to main (D-002, D-011):
-#   test     - the PR checks again on the merged revision
-#   package  - wheel + units + packaging + SHA256SUMS in a one-layer OCI image (no base),
-#              pushed to box1-ci/box1-ops-erp-simulator by digest
-#   security - central box1-security-gates (SBOM to TPA, ACS scan), observe mode
-# #25 pins the resulting digest in its bootc Containerfile. There is no promote task:
-# the appliance is not deployed by Argo CD.
-# Inert until the Repository CR and a ci-erp-release service account exist (D-002).
-# NOT YET RUN on the cluster. scripts/make-oci-layout.py and the skopeo copy were checked locally
-# (reproducible digest; skopeo reads the layout); the in-cluster push and RBAC are unverified.
+# Release on push to main: run the shared legacy-erp-appliance Pipeline, defined
+# once in box1-org/legacy-erp (.tekton/appliance-pipeline.yaml, box1-docs#25), with
+# this commit and legacy-erp main. It tests this repository (ruff, pytest against
+# the pinned contracts), builds the legacy-erp RHEL image mode OS image with this
+# source, scans it, promotes it through box1-workloads-dev, and applies it in the
+# running VM with `bootc upgrade --apply`, verifying the booted digest and units.
+# legacy-erp pushes run the same Pipeline with the roles swapped.
+# The earlier one-layer bundle image (scripts/make-oci-layout.py) is no longer
+# produced; the appliance builds from source.
+---
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
@@ -19,160 +19,35 @@ metadata:
     pipelinesascode.tekton.dev/on-target-branch: "[main]"
     pipelinesascode.tekton.dev/target-namespace: box1-ci
     pipelinesascode.tekton.dev/max-keep-runs: "10"
+    pipelinesascode.tekton.dev/pipeline: "https://raw.githubusercontent.com/box1-org/legacy-erp/main/.tekton/appliance-pipeline.yaml"
 spec:
+  pipelineRef:
+    name: legacy-erp-appliance
   taskRunTemplate:
-    serviceAccountName: ci-erp-release
+    serviceAccountName: ci-bootc-release
   timeouts:
-    pipeline: 30m
+    pipeline: 120m
   params:
-    - name: revision
+    - name: os-revision
+      value: main
+    - name: erp-revision
       value: "{{revision}}"
     - name: git-auth-secret
       value: "{{git_auth_secret}}"
     - name: security-gates
       value: observe
-  pipelineSpec:
-    params:
-      - name: revision
-        type: string
-      - name: git-auth-secret
-        type: string
-      - name: security-gates
-        type: string
-        default: observe
-    tasks:
-      - name: package
-        retries: 1
-        params:
-          - name: revision
-            value: "$(params.revision)"
-          - name: git-auth-secret
-            value: "$(params.git-auth-secret)"
-        taskSpec:
-          params:
-            - name: revision
-            - name: git-auth-secret
-          results:
-            - name: image-digest
-              description: Digest of the pushed artifact image.
-            - name: image-url
-              description: Repository of the pushed artifact image.
-            - name: wheel-sha256
-              description: sha256 of the wheel inside the image.
-          volumes:
-            - name: workspace
-              emptyDir: {}
-          stepTemplate:
-            # Every step works in /workspace itself. Tekton creates all step containers at pod start,
-            # and the container runtime creates a missing working directory as root, so a
-            # subdirectory here would exist, root-owned, before fetch could create it (box1-docs#14).
-            workingDir: /workspace
-            computeResources:
-              requests: {cpu: 250m, memory: 512Mi}
-              limits: {cpu: "1", memory: 1Gi}
-            env:
-              - name: REVISION
-                value: "$(params.revision)"
-              - name: HOME
-                value: /workspace
-            volumeMounts:
-              - name: workspace
-                mountPath: /workspace
-          steps:
-            - name: fetch
-              image: registry.access.redhat.com/ubi10/python-312-minimal@sha256:7a3ccd58d8a660d782e8705585aaea2ffe2f2a5d3285507a265dae7d0302b233
-              env:
-                - name: GITHUB_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: "$(params.git-auth-secret)"
-                      key: git-provider-token
-              script: |
-                #!/bin/sh
-                set -eu
-                echo "$REVISION" | grep -Eq '^[a-f0-9]{40}$'
-                untar() {  # untar <archive> <dir>: strip the top directory; the image has no tar or gzip
-                  python3 - "$1" "$2" <<'PY'
-                import sys, tarfile
-                src, dst = sys.argv[1], sys.argv[2]
-                with tarfile.open(src) as t:
-                    members = []
-                    for m in t.getmembers():
-                        parts = m.name.split("/", 1)
-                        if len(parts) == 2 and parts[1]:
-                            m.name = parts[1]
-                            members.append(m)
-                    t.extractall(dst, members=members, filter="data")
-                PY
-                }
-                mkdir -p source
-                curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /workspace/src.tgz \
-                  "https://api.github.com/repos/box1-org/box1-ops-erp-simulator/tarball/$REVISION"
-                untar /workspace/src.tgz source
-                sha=$(sed -n 's/^commit=//p' source/contracts.lock)
-                mkdir -p source/.contracts
-                curl -fsSL -o /workspace/contracts.tgz "https://codeload.github.com/box1-org/box1-ops-contracts/tar.gz/$sha"
-                untar /workspace/contracts.tgz source/.contracts
-            - name: test-and-build
-              image: registry.access.redhat.com/ubi10/python-312-minimal@sha256:7a3ccd58d8a660d782e8705585aaea2ffe2f2a5d3285507a265dae7d0302b233
-              script: |
-                #!/bin/sh
-                set -eu
-                cd /workspace/source
-                python3 -m venv /workspace/venv
-                /workspace/venv/bin/pip install --quiet --require-virtualenv -r requirements-dev.txt
-                /workspace/venv/bin/ruff check src tests
-                /workspace/venv/bin/pytest -q -p no:cacheprovider
-                # Fixed timestamps: the same source gives the same wheel and image digest.
-                SOURCE_DATE_EPOCH=315532800 /workspace/venv/bin/python -m build --wheel --outdir /workspace/bundle .
-                cp -r systemd packaging config docs/VM-INTEGRATION.md docs/RUNBOOK.md /workspace/bundle/
-                (cd /workspace/bundle && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
-                sha256sum /workspace/bundle/*.whl | cut -d' ' -f1 | tr -d '\n' > "$(results.wheel-sha256.path)"
-                python3 scripts/make-oci-layout.py /workspace/bundle /workspace/oci "$REVISION"
-            - name: push
-              # Unprivileged: the image is assembled as an OCI layout in Python; skopeo only copies it.
-              image: registry.access.redhat.com/ubi9/skopeo@sha256:fd3d5c37f5d204af77d02e2743a10e538a9d1e8b67d8736eff86b9be4c564e1f
-              script: |
-                #!/bin/sh
-                set -eu
-                IMAGE=image-registry.openshift-image-registry.svc:5000/box1-ci/box1-ops-erp-simulator
-                mkdir -p /workspace/certs
-                cp /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt /workspace/certs/ca.crt
-                token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-                skopeo copy --dest-cert-dir /workspace/certs --dest-creds "serviceaccount:$token" \
-                  --digestfile /workspace/digest oci:/workspace/oci:latest "docker://$IMAGE:$REVISION"
-                digest=$(cat /workspace/digest)
-                echo "$digest" | grep -Eq '^sha256:[a-f0-9]{64}$'
-                printf '%s' "$digest" > "$(results.image-digest.path)"
-                printf '%s' "$IMAGE" > "$(results.image-url.path)"
-                printf 'Published %s@%s\n' "$IMAGE" "$digest"
-      - name: security
-        runAfter: [package]
-        taskRef:
-          resolver: cluster
-          params:
-            - name: kind
-              value: task
-            - name: name
-              value: box1-security-gates
-            - name: namespace
-              value: box1-ci
-        params:
-          - name: image-reference
-            value: "image-registry.openshift-image-registry.svc:5000/box1-ci/box1-ops-erp-simulator@$(tasks.package.results.image-digest)"
-          - name: image-digest
-            value: "$(tasks.package.results.image-digest)"
-          - name: source-revision
-            value: "$(params.revision)"
-          - name: source-repository
-            value: box1-org/box1-ops-erp-simulator
-          - name: application-name
-            value: box1-ops-erp-simulator
-          - name: pipeline-run
-            value: "$(context.pipelineRun.name)"
-          - name: enforcement
-            value: "$(params.security-gates)"
-          - name: rhtpa-secret
-            value: rhtpa-ci
-          - name: rhacs-secret
-            value: rhacs-ci
+  taskRunSpecs:
+    - pipelineTaskName: resolve
+      serviceAccountName: ci-test
+    - pipelineTaskName: erp-test
+      serviceAccountName: ci-test
+    - pipelineTaskName: current
+      serviceAccountName: ci-test
+    - pipelineTaskName: security
+      serviceAccountName: ci-build
+    - pipelineTaskName: promote
+      serviceAccountName: ci-gitops
+    - pipelineTaskName: deploy
+      serviceAccountName: ci-vm-deploy
+    - pipelineTaskName: smoke
+      serviceAccountName: ci-observe

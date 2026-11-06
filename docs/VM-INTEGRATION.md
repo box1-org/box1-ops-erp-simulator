@@ -4,7 +4,16 @@ What this repository provides, how #25 installs it, and what #25 must show in th
 
 ## Artifact
 
-`box1_ops_erp_simulator-<version>-py3-none-any.whl` plus `systemd/`, `packaging/`, `config/` and this document. Standard library only (Python 3.12, RHEL 10's system Python). Proposed delivery (D-002, needs approval): an OCI image `FROM scratch` holding these files and a `SHA256SUMS`, pushed to `box1-ci/box1-ops-erp-simulator@sha256:<digest>` and consumed in the bootc Containerfile with `COPY --from=<registry>/box1-ci/box1-ops-erp-simulator@sha256:<digest> / /tmp/box1-erp/`. Pin by digest.
+`box1_ops_erp_simulator-<version>-py3-none-any.whl` plus `systemd/`, `packaging/`, `config/` and this document. Standard library only (Python 3.12, RHEL 10's system Python).
+
+**Delivery (box1-docs#25):** built from source into the legacy-erp OS image. There is one release pipeline for both repositories, `legacy-erp-appliance`, defined in [box1-org/legacy-erp `.tekton/appliance-pipeline.yaml`](https://github.com/box1-org/legacy-erp/blob/main/.tekton/appliance-pipeline.yaml). A push to `main` here or in legacy-erp runs it, as follows:
+
+- it resolves both commits;
+- it runs this repository's ruff and pytest;
+- it fetches this source at the resolved commit into `erp-src/` of the bootc build;
+- the build stage makes the wheel (`SOURCE_DATE_EPOCH=315532800`) and the OS stage installs it as below.
+
+The commit is recorded in the image label `org.box1.erp.revision` and in `/usr/lib/box1-image-release` (`ERP_REVISION=`). The OS image digest pins the exact wheel. The earlier one-layer bundle image (D-002, `scripts/make-oci-layout.py`) is no longer produced.
 
 ## Install (bootc image build)
 
