@@ -1,0 +1,64 @@
+[Unit]
+Description=box1 legacy ERP worker (file ingestion, AUTO processing, result publication)
+Documentation=file:/usr/share/doc/box1-erp/RUNBOOK.md
+# The ledger and the exchange live on the data volume (#25). Without the mount the
+# worker must not start: it never creates a ledger (exit 2, no restart).
+RequiresMountsFor=/srv/box1-erp
+After=local-fs.target
+# No hard start limit: restarts back off from 5 s to 5 min, so a transient fault
+# (volume late, disk full) recovers on its own without a restart storm.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+# The worker pings the watchdog at least every 2 s; a hung worker is killed and restarted.
+WatchdogSec=60
+User=box1erp
+Group=box1erp
+SupplementaryGroups=erpxfer
+UMask=0027
+Environment=BOX1_ERP_CONFIG=/etc/box1-erp/erp.conf
+ExecStart=/usr/lib/box1-erp/venv/bin/box1-erp worker
+# Exit 70 is the demo one-shot crash: restart and recover. Exit 2 is a missing
+# ledger or data volume: stay down and visible rather than restart in a loop.
+Restart=on-failure
+RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=300
+RestartPreventExitStatus=2
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=box1-erp-worker
+MemoryMax=256M
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/srv/box1-erp/state /srv/box1-erp/exchange
+ReadOnlyPaths=/srv/box1-erp/state/backups
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
+
+[Install]
+WantedBy=box1-erp.target

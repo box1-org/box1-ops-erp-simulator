@@ -1,0 +1,17 @@
+# /etc/box1-erp/erp.conf  (root:box1erp 0640; the application only reads it)
+[paths]
+# One data volume is mounted at /srv/box1-erp (root:root 0755).
+# Ledger, spool and backups: private to box1erp.
+state_dir = /srv/box1-erp/state
+# SFTP exchange and chroot: inbound/, outbound/, consumed/. Same volume, so moves are renames.
+exchange_dir = /srv/box1-erp/exchange
+
+[demo]
+# Enables the console's demo fault screen (pause publication, delay AUTO,
+# one-shot crash after commit). Leave false outside demonstrations.
+faults = false
+
+[worker]
+poll_interval = 1.0
+heartbeat_stale_seconds = 10
+consumed_retention_days = 7

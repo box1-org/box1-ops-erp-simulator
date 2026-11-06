@@ -1,0 +1,3 @@
+repository=https://github.com/box1-org/box1-ops-contracts.git
+# box1-ops-contracts main after merging PR #6 (ERP1 protocol v1).
+commit=eef13ead19aa2ed4b6bae071f26e14dd1676f8f1

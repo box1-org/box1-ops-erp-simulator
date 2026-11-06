@@ -1,0 +1,12 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: box1-ops-erp-simulator
+  description: Legacy ERP appliance with console TUI, SQLite ledger and ERP1 file exchange over SFTP
+  annotations:
+    github.com/project-slug: box1-org/box1-ops-erp-simulator
+  tags: [python, legacy, vm]
+spec:
+  type: service
+  lifecycle: experimental
+  owner: user:default/mike4263

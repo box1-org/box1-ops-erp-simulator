@@ -1,0 +1,17 @@
+# Reference for #25 (which owns sshd): /etc/ssh/sshd_config.d/50-box1-erp-sftp.conf
+# The adapter's account is SFTP-only, key-only, chrooted to the exchange, with no
+# shell, TTY or forwarding. The ledger at /var/lib/box1-erp is outside the chroot.
+Match User erpsftp
+    # Keys live outside the chroot and the account's home; root-owned, 0644.
+    AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+    ChrootDirectory /srv/box1-erp/exchange
+    ForceCommand internal-sftp -u 0007
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+    PermitTTY no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    AllowStreamLocalForwarding no
+    X11Forwarding no
+    PermitTunnel no
