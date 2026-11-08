@@ -14,6 +14,7 @@ spec:
   type: service
   lifecycle: experimental
   owner: user:default/mike
+  system: box1-operations
   # Application source only; it runs inside the legacy-erp VM, which provides
   # the erp1-file-exchange API (component:legacy-erp dependsOn this component).
   # Its counterpart over SFTP is component:fulfillment-adapter.
